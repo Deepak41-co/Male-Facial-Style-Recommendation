@@ -2,11 +2,12 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from collections import deque
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import base64
 import hashlib
 import math # Import for more precise distance calculations
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -55,12 +56,17 @@ class FaceShapeDetector:
         }
 
     def get_image_hash(self, image):
+        """Generates a hash of the image bytes for caching purposes."""
         return hashlib.md5(image.tobytes()).hexdigest()
 
     def get_face_landmarks(self, image):
+        """Processes the image to detect 3D face mesh landmarks."""
         try:
             rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            # Setting writeable=False speeds up processing
+            rgb_image.flags.writeable = False 
             results = self.face_mesh.process(rgb_image)
+            rgb_image.flags.writeable = True
             
             if not results.multi_face_landmarks:
                 return None
@@ -68,6 +74,7 @@ class FaceShapeDetector:
             landmarks = results.multi_face_landmarks[0]
             h, w = image.shape[:2]
             
+            # Convert normalized landmarks to pixel coordinates
             landmark_points = []
             for landmark in landmarks.landmark:
                 x = int(landmark.x * w)
@@ -80,67 +87,59 @@ class FaceShapeDetector:
             return None
 
     def calculate_face_ratios(self, landmarks):
+        """Calculates key facial measurements and ratios based on landmarks."""
         if not landmarks:
             return None
         
         try:
             idx = self.landmark_indices
             
+            # Function to calculate Euclidean distance between two landmark points
+            def dist(p1_idx, p2_idx):
+                p1 = np.array(landmarks[p1_idx])
+                p2 = np.array(landmarks[p2_idx])
+                return np.linalg.norm(p1 - p2)
+            
             # --- Measurement Calculations ---
             
             # Forehead Width (Distance between points 54 and 284)
-            forehead_width = np.linalg.norm(
-                np.array(landmarks[idx['forehead_left']]) - 
-                np.array(landmarks[idx['forehead_right']])
-            )
+            forehead_width = dist(idx['forehead_left'], idx['forehead_right'])
             
             # Cheek Width (Distance between points 234 and 454 - Widest part of the face)
-            cheek_width = np.linalg.norm(
-                np.array(landmarks[idx['cheek_left']]) - 
-                np.array(landmarks[idx['cheek_right']])
-            )
+            cheek_width = dist(idx['cheek_left'], idx['cheek_right'])
             
             # Jaw Width (Distance between points 172 and 397 - Jaw corners)
-            jaw_width = np.linalg.norm(
-                np.array(landmarks[idx['jaw_left']]) - 
-                np.array(landmarks[idx['jaw_right']])
-            )
+            jaw_width = dist(idx['jaw_left'], idx['jaw_right'])
             
             # Face Length (Distance between points 10 and 152 - Forehead center to Chin)
-            face_length = np.linalg.norm(
-                np.array(landmarks[idx['forehead_center']]) - 
-                np.array(landmarks[idx['chin']])
-            )
+            face_length = dist(idx['forehead_center'], idx['chin'])
             
             # Jaw Mid Width (Used for jaw shape progression)
-            jaw_mid_width = np.linalg.norm(
-                np.array(landmarks[idx['jaw_mid_left']]) - 
-                np.array(landmarks[idx['jaw_mid_right']])
-            )
+            jaw_mid_width = dist(idx['jaw_mid_left'], idx['jaw_mid_right'])
             
             # --- Ratio Calculations ---
             
-            # 1. Length-to-Max-Width Ratio
+            # 1. Length-to-Max-Width Ratio (Key for Oblong vs Round/Square)
             max_width = max(forehead_width, cheek_width, jaw_width)
             length_width_ratio = face_length / max_width if max_width > 0 else 1.0
             
-            # 2. Jaw-to-Forehead Ratio
+            # 2. Jaw-to-Forehead Ratio (Key for Heart/Triangle vs Oval/Square)
             jaw_forehead_ratio = jaw_width / forehead_width if forehead_width > 0 else 1.0
             
-            # 3. Cheek-to-Jaw Ratio (Cheekbones relative to jaw)
+            # 3. Cheek-to-Jaw Ratio (Cheekbones relative to jaw - Key for Diamond)
             cheek_jaw_ratio = cheek_width / jaw_width if jaw_width > 0 else 1.0
             
-            # 4. Forehead-to-Cheek Ratio (For Heart/Diamond)
+            # 4. Forehead-to-Cheek Ratio (For Heart/Diamond confirmation)
             forehead_cheek_ratio = forehead_width / cheek_width if cheek_width > 0 else 1.0
             
-            # 5. Jaw Progression (Used in original code, kept for consistency)
+            # 5. Jaw Progression (Indicates sharpness of jaw corners - Key for Square vs Round)
             jaw_progression = jaw_width / jaw_mid_width if jaw_mid_width > 0 else 1.0
             
             return {
                 'length_width_ratio': length_width_ratio,
                 'jaw_forehead_ratio': jaw_forehead_ratio,
                 'cheek_jaw_ratio': cheek_jaw_ratio,
-                'forehead_cheek_ratio': forehead_cheek_ratio, # New ratio
+                'forehead_cheek_ratio': forehead_cheek_ratio,
                 'jaw_progression': jaw_progression,
                 'face_length': face_length,
                 'jaw_width': jaw_width,
@@ -164,68 +163,69 @@ class FaceShapeDetector:
             cj_ratio = ratios['cheek_jaw_ratio']
             fc_ratio = ratios['forehead_cheek_ratio']
             
-            # --- STEP 1: LONG VS. SHORT FACES ---
+            shape = 'Unknown'
             
+            # --- Classification Logic (Prioritized by Extremity) ---
+
+            # 1. Long Faces (Oblong, Oval, long Heart/Diamond)
             if lw_ratio > 1.4:
-                # Long faces (Oval, Oblong, possibly long Heart/Diamond)
-                if lw_ratio > 1.6: # Very long
-                    if abs(jf_ratio - 1.0) < 0.1:
-                        shape = 'oblong' # Uniform width
+                if lw_ratio > 1.6: 
+                    # Very long
+                    if 0.95 < jf_ratio < 1.05 and 0.95 < cj_ratio < 1.05:
+                        shape = 'oblong' # Uniform width, long
+                    elif fc_ratio < 0.9:
+                        shape = 'diamond' # Narrow forehead/jaw, wide cheeks
                     else:
-                        shape = 'diamond' # Likely wider cheekbones than jaw/forehead
+                        shape = 'oblong'
                 elif fc_ratio < 0.9:
-                    shape = 'heart' # Wide forehead, narrow jaw
-                elif 1.35 < lw_ratio <= 1.55 and 0.85 < jf_ratio < 1.05 and 0.95 < cj_ratio < 1.15:
+                    # Wide cheeks/forehead relative to jaw
+                    shape = 'heart'
+                elif 1.35 < lw_ratio <= 1.55 and 0.85 < jf_ratio < 1.05:
                     shape = 'oval' # Balanced medium length
                 else:
                     shape = 'oblong'
             
-            elif lw_ratio < 1.2:
-                # Short/Wide faces (Round, Square)
-                if abs(jf_ratio - 1.0) < 0.1:
-                    # Uniform width at jaw and forehead
-                    shape = 'round' 
-                elif jf_ratio > 1.1:
+            # 2. Short/Wide Faces (Round, Square, Triangle)
+            elif lw_ratio < 1.25:
+                # Jaw/Forehead width check
+                if jf_ratio > 1.1:
                     shape = 'triangle' # Wider jaw than forehead
-                else:
-                    shape = 'square' # Wide and structured jaw/forehead
-            
-            else:
-                # Medium length faces (Square, Diamond, Heart, Triangle, Oval)
-                
-                # Check for Diamond (Cheekbones widest)
-                if cj_ratio > 1.1:
-                    if fc_ratio < 0.9:
-                         shape = 'diamond'
+                elif abs(ratios['jaw_width'] - ratios['forehead_width']) < 0.1 * ratios['face_length']:
+                    # Widths are roughly equal
+                    if ratios['jaw_progression'] < 1.15:
+                        shape = 'round' # Rounded jaw corners
                     else:
-                        shape = 'heart' # Transition case
-                
-                # Check for Triangle (Jaw widest)
-                elif jf_ratio > 1.1:
-                    shape = 'triangle'
+                        shape = 'square' # Stronger, defined jaw corner
+                else:
+                    shape = 'round'
+
+            # 3. Medium Length Faces (Diamond, Heart, Square, Oval, Triangle)
+            else:
+                # Check for Diamond (Cheekbones widest)
+                if cj_ratio > 1.15 and fc_ratio < 1.05:
+                    shape = 'diamond'
                 
                 # Check for Heart (Forehead widest, jaw narrow)
-                elif fc_ratio > 1.05 and jf_ratio < 0.9:
+                elif fc_ratio > 1.05 and jf_ratio < 0.95:
                     shape = 'heart'
+                
+                # Check for Triangle (Jaw widest)
+                elif jf_ratio > 1.05:
+                    shape = 'triangle'
                     
-                # Check for Square (Uniform/wide width and length)
-                elif abs(jf_ratio - 1.0) < 0.15 and lw_ratio < 1.35:
+                # Check for Square (Uniform/wide width and strong jaw)
+                elif abs(jf_ratio - 1.0) < 0.15 and ratios['jaw_progression'] > 1.2:
                     shape = 'square'
                 
                 # Default to Oval (Balanced proportions)
                 else:
                     shape = 'oval'
 
-            # --- STEP 2: Final Review (Minimal) ---
-            
-            # Differentiate Round and Square when ratios are close to 1
-            if shape == 'square' and ratios['jaw_progression'] > 1.25:
-                # High jaw progression indicates a sharp corner, confirming Square
-                pass 
-            elif shape == 'square' and ratios['jaw_progression'] < 1.1:
-                # Rounded jaw corners
-                shape = 'round' 
-                
+            # Final check to distinguish Round/Square based on jaw angle
+            if shape == 'square' and ratios['jaw_progression'] < 1.15:
+                 # If classified as square but jaw corners are round, change to round
+                 shape = 'round'
+                    
             return self.face_shapes.get(shape, 'Unknown')
             
         except Exception as e:
@@ -301,7 +301,9 @@ class FaceShapeDetector:
             'confidence': round(confidence, 1),
             'measurements': {
                 'face_length': round(ratios['face_length'], 1),
-                'face_width': round(max(ratios['forehead_width'], ratios['jaw_width']), 1),
+                'face_width': round(ratios['cheek_width'], 1), # Use cheek width as max width proxy for display
+                'forehead_width': round(ratios['forehead_width'], 1),
+                'jaw_width': round(ratios['jaw_width'], 1),
                 'length_width_ratio': round(ratios['length_width_ratio'], 2),
                 'jaw_forehead_ratio': round(ratios['jaw_forehead_ratio'], 2),
                 'cheek_jaw_ratio': round(ratios['cheek_jaw_ratio'], 2)
@@ -343,10 +345,10 @@ def analyze_face():
         if image is None:
             return jsonify({
                 'success': False,
-                'error': 'Invalid image data'
+                'error': 'Invalid image data (could not decode image)'
             }), 400
 
-        # Resize image for consistent processing (Kept original logic)
+        # Resize image for consistent processing
         height, width = image.shape[:2]
         if width > 800:
             scale = 800 / width
@@ -365,7 +367,7 @@ def analyze_face():
         else:
             return jsonify({
                 'success': False,
-                'error': 'No face detected in the image'
+                'error': 'No face detected in the image. Please ensure the face is clearly visible and well-lit.'
             })
 
     except Exception as e:
@@ -374,21 +376,22 @@ def analyze_face():
             'success': False,
             'error': f'Internal server error: {str(e)}'
         }), 500
-from flask import send_from_directory
+
 
 @app.route('/')
 def serve_home():
-    return send_from_directory('../Frontend', 'front.html')
+    # FIXED: Serving from 'Frontend' subdirectory relative to the CWD (/app)
+    return send_from_directory('Frontend', 'front.html')
 
 @app.route('/<path:path>')
 def serve_static_files(path):
-    return send_from_directory('../Frontend', path)
+    # FIXED: Serving static files from the 'Frontend' subdirectory
+    return send_from_directory('Frontend', path)
 
 if __name__ == '__main__':
     print("🚀 Starting Face Shape Analysis API...")
     print("📍 Backend URL: http://localhost:5000")
     print("⚡ Features: 7 Face Shapes, Advanced Measurements, Personalized Recommendations")
-    import os
     port = int(os.environ.get('PORT', 10000))
     print(f"🚀 Running Face Shape API on port {port}")
     app.run(host='0.0.0.0', port=port)
