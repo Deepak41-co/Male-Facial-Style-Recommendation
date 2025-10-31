@@ -379,4 +379,7 @@ if __name__ == '__main__':
     print("🚀 Starting Face Shape Analysis API...")
     print("📍 Backend URL: http://localhost:5000")
     print("⚡ Features: 7 Face Shapes, Advanced Measurements, Personalized Recommendations")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    import os
+    port = int(os.environ.get('PORT', 10000))
+    print(f"🚀 Running Face Shape API on port {port}")
+    app.run(host='0.0.0.0', port=port)
