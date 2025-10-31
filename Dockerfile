@@ -34,4 +34,4 @@ ENV PORT=10000
 ENV PYTHONUNBUFFERED=1
 
 # --- Start Gunicorn Server ---
-CMD ["gunicorn", "--bind", "0.0.0.0:10000", "augmented:app"]
+CMD sh -c "gunicorn --bind 0.0.0.0:${PORT} augmented:app"

@@ -374,6 +374,15 @@ def analyze_face():
             'success': False,
             'error': f'Internal server error: {str(e)}'
         }), 500
+from flask import send_from_directory
+
+@app.route('/')
+def serve_home():
+    return send_from_directory('../Frontend', 'front.html')
+
+@app.route('/<path:path>')
+def serve_static_files(path):
+    return send_from_directory('../Frontend', path)
 
 if __name__ == '__main__':
     print("🚀 Starting Face Shape Analysis API...")
