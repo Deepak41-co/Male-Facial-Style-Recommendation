@@ -1,15 +1,17 @@
 # --- Base Image ---
-FROM python:3.9-slim
+# CHANGED FROM python:3.10-slim to python:3.10 to fix the mediapipe dependency issue.
+# The 'slim' image often lacks the underlying system libraries (GLIBC) 
+# needed for complex pre-compiled packages like MediaPipe.
+FROM python:3.10
 
 # --- System Dependencies for OpenCV & Mediapipe ---
-RUN apt-get update && apt-get install -y \
-	gcc \
-    g++ \
-    build-essential \
+# These system libraries are still necessary for the runtime of
+# visual packages like opencv-python-headless and mediapipe.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
-    libxrender-dev \
+    libxrender1 \
     libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
