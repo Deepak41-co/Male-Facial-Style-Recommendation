@@ -10,27 +10,23 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Working Directory ---
+# --- Set Working Directory ---
 WORKDIR /app
 
-# --- Copy Backend Files ---
+# --- Copy Application Files ---
 COPY Backend/ /app/
-
-# --- Copy Frontend Files ---
 COPY Frontend/ /app/Frontend/
-
-# --- Copy Dependencies ---
 COPY requirements.txt .
 
 # --- Install Dependencies ---
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- Expose Render Port ---
+# --- Expose Port (for Render or Local use) ---
 EXPOSE 10000
 
 # --- Environment Variables ---
 ENV PORT=10000
 ENV PYTHONUNBUFFERED=1
 
-# --- Start Command ---
+# --- Start Gunicorn Server ---
 CMD ["gunicorn", "--bind", "0.0.0.0:10000", "augmented:app"]

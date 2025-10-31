@@ -1,6 +1,6 @@
-Flask
-Flask-Cors
+flask
+flask-cors
 opencv-python-headless
-mediapipe
+mediapipe==0.10.14 --extra-index-url https://google-coral.github.io/py-repo/
 numpy
 gunicorn
