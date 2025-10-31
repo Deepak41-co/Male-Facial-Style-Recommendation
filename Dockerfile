@@ -1,5 +1,5 @@
 # --- Base Image ---
-FROM python:3.10-slim-bullseye
+FROM python:3.9-slim
 
 # --- System Dependencies for OpenCV & Mediapipe ---
 RUN apt-get update && apt-get install -y \
